@@ -2,7 +2,8 @@
   "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
   "version": 1,
   "cli": {
-    "packageManager": "npm"
+    "packageManager": "npm",
+    "analytics": false
   },
   "newProjectRoot": "projects",
   "projects": {
@@ -15,46 +16,39 @@
       },
       "root": "",
       "sourceRoot": "src",
-      "prefix": "app",
+      "prefix": "mf",
       "architect": {
         "build": {
           "builder": "@angular/build:application",
           "options": {
             "browser": "src/main.ts",
             "tsConfig": "tsconfig.app.json",
+            "webWorkerTsConfig": "tsconfig.worker.json",
             "inlineStyleLanguage": "scss",
+            "loader": { ".txt": "text" },
+            "outputMode": "static",
             "assets": [
+              { "glob": "**/*", "input": "public" },
               {
                 "glob": "**/*",
-                "input": "public"
+                "input": "node_modules/monaco-editor/min/vs",
+                "output": "assets/monaco/vs",
+                "ignore": ["**/*.map"]
               }
             ],
-            "styles": [
-              "src/styles.scss"
-            ],
-            "server": "src/main.server.ts",
-            "outputMode": "server",
-            "security": {
-              "allowedHosts": []
-            },
-            "ssr": {
-              "entry": "src/server.ts"
-            }
+            "styles": ["node_modules/@angular/cdk/overlay-prebuilt.css", "src/styles.scss"]
           },
           "configurations": {
             "production": {
               "budgets": [
-                {
-                  "type": "initial",
-                  "maximumWarning": "500kB",
-                  "maximumError": "1MB"
-                },
-                {
-                  "type": "anyComponentStyle",
-                  "maximumWarning": "4kB",
-                  "maximumError": "8kB"
-                }
+                { "type": "initial", "maximumWarning": "900kB", "maximumError": "1.5MB" },
+                { "type": "anyComponentStyle", "maximumWarning": "8kB", "maximumError": "16kB" }
               ],
+              "optimization": {
+                "scripts": true,
+                "fonts": false,
+                "styles": { "minify": true, "inlineCritical": false }
+              },
               "outputHashing": "all"
             },
             "development": {
@@ -68,17 +62,24 @@
         "serve": {
           "builder": "@angular/build:dev-server",
           "configurations": {
-            "production": {
-              "buildTarget": "mapforge:build:production"
-            },
-            "development": {
-              "buildTarget": "mapforge:build:development"
-            }
+            "production": { "buildTarget": "mapforge:build:production" },
+            "development": { "buildTarget": "mapforge:build:development" }
           },
           "defaultConfiguration": "development"
         },
         "test": {
-          "builder": "@angular/build:unit-test"
+          "builder": "@angular/build:unit-test",
+          "options": {
+            "buildTarget": "mapforge:build:development",
+            "tsConfig": "tsconfig.spec.json",
+            "runner": "vitest",
+            "setupFiles": ["src/test-setup.ts"],
+            "include": [
+              "src/app/features/**/*.spec.ts",
+              "src/app/shared/**/*.spec.ts",
+              "src/app/app.spec.ts"
+            ]
+          }
         }
       }
     }

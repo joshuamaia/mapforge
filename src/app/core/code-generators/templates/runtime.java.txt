@@ -1,0 +1,888 @@
+//#region isNil
+private static boolean isNil(Object v) {
+  return v == null;
+}
+//#endregion
+//#region formatNumber
+private static String formatNumber(double n) {
+  if (n == Math.rint(n) && Math.abs(n) < 1e15) {
+    return Long.toString((long) n);
+  }
+  return Double.toString(n);
+}
+//#endregion
+//#region toText
+private static String toText(Object v) {
+  if (v == null) return "";
+  if (v instanceof Enum<?> e) return e.name();
+  if (v instanceof Number n) return formatNumber(n.doubleValue());
+  if (v instanceof LocalDateTime t) return t.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+  return String.valueOf(v);
+}
+//#endregion
+//#region looseNumber
+private static final Pattern NUMERIC = Pattern.compile("^[+-]?(\\d+(\\.\\d*)?|\\.\\d+)([eE][+-]?\\d+)?$");
+
+private static Double looseNumber(Object v) {
+  if (v instanceof Number n) return n.doubleValue();
+  if (v instanceof CharSequence s && NUMERIC.matcher(s.toString().trim()).matches()) {
+    return Double.valueOf(s.toString().trim());
+  }
+  return null;
+}
+//#endregion
+//#region compareValues
+private static int compareValues(Object a, Object b) {
+  Double na = looseNumber(a);
+  Double nb = looseNumber(b);
+  if (na != null && nb != null) return Double.compare(na, nb);
+  return Integer.signum(toText(a).compareTo(toText(b)));
+}
+//#endregion
+//#region valuesEqual
+private static boolean valuesEqual(Object a, Object b) {
+  if (a == null || b == null) return a == null && b == null;
+  return toText(a).equals(toText(b));
+}
+//#endregion
+//#region isEmptyValue
+private static boolean isEmptyValue(Object v) {
+  if (v == null || "".equals(v)) return true;
+  if (v instanceof Collection<?> c) return c.isEmpty();
+  return v instanceof Map<?, ?> m && m.isEmpty();
+}
+//#endregion
+//#region toList
+private static List<Object> toList(Object v) {
+  if (v instanceof Collection<?> c) return new ArrayList<>(c);
+  if (v == null) return new ArrayList<>();
+  List<Object> out = new ArrayList<>();
+  for (String part : splitLiteral(toText(v), ",")) out.add(part.trim());
+  return out;
+}
+//#endregion
+//#region splitLiteral
+private static List<String> splitLiteral(String text, String separator) {
+  List<String> out = new ArrayList<>();
+  if (separator.isEmpty()) {
+    for (int i = 0; i < text.length(); i++) out.add(String.valueOf(text.charAt(i)));
+    return out;
+  }
+  int from = 0;
+  int at;
+  while ((at = text.indexOf(separator, from)) >= 0) {
+    out.add(text.substring(from, at));
+    from = at + separator.length();
+  }
+  out.add(text.substring(from));
+  return out;
+}
+//#endregion
+//#region evaluate
+private static boolean evaluate(Object value, String operator, Object compare) {
+  switch (operator) {
+    case "eq": return valuesEqual(value, compare);
+    case "ne": return !valuesEqual(value, compare);
+    case "gt": return value != null && compareValues(value, compare) > 0;
+    case "gte": return value != null && compareValues(value, compare) >= 0;
+    case "lt": return value != null && compareValues(value, compare) < 0;
+    case "lte": return value != null && compareValues(value, compare) <= 0;
+    case "contains":
+      if (value instanceof Collection<?> c) {
+        for (Object x : c) if (valuesEqual(x, compare)) return true;
+        return false;
+      }
+      return value != null && toText(value).contains(toText(compare));
+    case "startsWith": return value != null && toText(value).startsWith(toText(compare));
+    case "endsWith": return value != null && toText(value).endsWith(toText(compare));
+    case "in":
+      for (Object x : toList(compare)) if (valuesEqual(value, x)) return true;
+      return false;
+    case "notIn":
+      for (Object x : toList(compare)) if (valuesEqual(value, x)) return false;
+      return true;
+    case "exists": return value != null;
+    case "notExists": return value == null;
+    case "empty": return isEmptyValue(value);
+    case "notEmpty": return !isEmptyValue(value);
+    case "matches":
+      try {
+        return value != null && Pattern.compile(toText(compare)).matcher(toText(value)).find();
+      } catch (RuntimeException e) {
+        return false;
+      }
+    default: return false;
+  }
+}
+//#endregion
+//#region lift
+/** Aplica a função a cada item de uma lista. Nulo atravessa sem chamar a função. */
+private static Object lift(Object v, Function<Object, Object> fn) {
+  if (v instanceof Collection<?> c) {
+    List<Object> out = new ArrayList<>();
+    for (Object x : c) out.add(x == null ? null : fn.apply(x));
+    return out;
+  }
+  return v == null ? null : fn.apply(v);
+}
+//#endregion
+//#region liftNullable
+/** Como lift, mas também chama a função com nulo. */
+private static Object liftNullable(Object v, Function<Object, Object> fn) {
+  if (v instanceof Collection<?> c) {
+    List<Object> out = new ArrayList<>();
+    for (Object x : c) out.add(fn.apply(x));
+    return out;
+  }
+  return fn.apply(v);
+}
+//#endregion
+//#region collect
+/** Coleta valores de uma lista, descartando os itens que não atendem ao filtro. */
+private static <T> List<Object> collect(Collection<T> list, Predicate<T> filter, Function<T, Object> fn) {
+  if (list == null) return null;
+  List<Object> out = new ArrayList<>();
+  for (T item : list) if (filter.test(item)) out.add(fn.apply(item));
+  return out;
+}
+//#endregion
+//#region collectFlat
+private static <T> List<Object> collectFlat(Collection<T> list, Function<T, List<Object>> fn) {
+  if (list == null) return null;
+  List<Object> out = new ArrayList<>();
+  for (T item : list) {
+    List<Object> inner = fn.apply(item);
+    if (inner != null) out.addAll(inner);
+  }
+  return out;
+}
+//#endregion
+//#region selectRows
+/** Seleciona as linhas de um array: filtro, depois distinct, depois ordenação estável. */
+private static <T> List<T> selectRows(Collection<T> rows, Predicate<T> filter, Function<T, Object> distinct, Function<T, Object> sort, boolean desc) {
+  List<T> out = new ArrayList<>();
+  Set<String> seen = new HashSet<>();
+  for (T row : rows) {
+    if (filter != null && !filter.test(row)) continue;
+    if (distinct != null) {
+      Object key = distinct.apply(row);
+      String text = (key instanceof String ? "s:" : key instanceof Number ? "n:" : "o:") + toText(key);
+      if (!seen.add(text)) continue;
+    }
+    out.add(row);
+  }
+  return sort == null ? out : sortBy(out, sort, desc);
+}
+//#endregion
+//#region sortBy
+private static <T> List<T> sortBy(List<T> list, Function<T, Object> key, boolean desc) {
+  List<T> out = new ArrayList<>(list);
+  int dir = desc ? -1 : 1;
+  out.sort((a, b) -> {
+    Object ka = key.apply(a);
+    Object kb = key.apply(b);
+    if (ka == null || kb == null) return ka == null && kb == null ? 0 : ka == null ? 1 : -1;
+    return compareValues(ka, kb) * dir;
+  });
+  return out;
+}
+//#endregion
+//#region uppercase
+private static Object uppercase(Object v) {
+  return toText(v).toUpperCase(Locale.ROOT);
+}
+//#endregion
+//#region lowercase
+private static Object lowercase(Object v) {
+  return toText(v).toLowerCase(Locale.ROOT);
+}
+//#endregion
+//#region trim
+private static Object trim(Object v) {
+  return toText(v).trim();
+}
+//#endregion
+//#region capitalize
+private static Object capitalize(Object v, boolean allWords) {
+  String lower = toText(v).toLowerCase(Locale.ROOT);
+  if (lower.isEmpty()) return lower;
+  if (!allWords) return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
+  StringBuilder out = new StringBuilder();
+  boolean start = true;
+  for (char ch : lower.toCharArray()) {
+    out.append(start ? Character.toUpperCase(ch) : ch);
+    start = Character.isWhitespace(ch);
+  }
+  return out.toString();
+}
+//#endregion
+//#region replaceText
+private static Object replaceText(Object v, String search, String replacement, boolean regex, boolean all) {
+  String text = toText(v);
+  if (regex) return all ? text.replaceAll(search, replacement) : text.replaceFirst(search, replacement);
+  if (search.isEmpty()) return text;
+  if (all) return text.replace(search, replacement);
+  int at = text.indexOf(search);
+  return at < 0 ? text : text.substring(0, at) + replacement + text.substring(at + search.length());
+}
+//#endregion
+//#region substringOf
+private static Object substringOf(Object v, int start, Integer end) {
+  String text = toText(v);
+  int a = Math.max(0, Math.min(start, text.length()));
+  int b = end == null ? text.length() : Math.max(0, Math.min(end, text.length()));
+  return text.substring(Math.min(a, b), Math.max(a, b));
+}
+//#endregion
+//#region splitText
+private static Object splitText(Object v, String separator) {
+  return new ArrayList<Object>(splitLiteral(toText(v), separator));
+}
+//#endregion
+//#region joinList
+private static Object joinList(Object v, String separator) {
+  if (v == null) return null;
+  if (!(v instanceof Collection<?> c)) return null;
+  List<String> parts = new ArrayList<>();
+  for (Object x : c) parts.add(toText(x));
+  return String.join(separator, parts);
+}
+//#endregion
+//#region concatText
+private static Object concatText(Object v, String prefix, String suffix, String separator, Object... others) {
+  List<String> parts = new ArrayList<>();
+  if (v != null) parts.add(toText(v));
+  for (Object o : others) if (o != null) parts.add(toText(o));
+  if (parts.isEmpty() && prefix.isEmpty() && suffix.isEmpty()) return v;
+  return prefix + String.join(separator, parts) + suffix;
+}
+//#endregion
+//#region removeAccents
+private static Object removeAccents(Object v) {
+  return Normalizer.normalize(toText(v), Normalizer.Form.NFD).replaceAll("\\p{M}+", "");
+}
+//#endregion
+//#region padText
+private static String padText(int missing, String fill) {
+  if (missing <= 0 || fill.isEmpty()) return "";
+  return fill.repeat(missing / fill.length() + 1).substring(0, missing);
+}
+//#endregion
+//#region padStartText
+private static Object padStartText(Object v, int length, String fill) {
+  String text = toText(v);
+  return padText(length - text.length(), fill) + text;
+}
+//#endregion
+//#region padEndText
+private static Object padEndText(Object v, int length, String fill) {
+  String text = toText(v);
+  return text + padText(length - text.length(), fill);
+}
+//#endregion
+//#region stringToNumber
+/** Valor inválido resulta em null, como no motor do MapForge. */
+private static Object stringToNumber(Object v, String decimalSeparator) {
+  if (v instanceof Number) return v;
+  String text = toText(v).trim();
+  return looseNumber(",".equals(decimalSeparator) ? text.replace(".", "").replace(",", ".") : text);
+}
+//#endregion
+//#region numberToText
+private static Object numberToText(Object v, Integer digits) {
+  Double n = looseNumber(v);
+  if (n == null) return null;
+  if (digits == null) return formatNumber(n);
+  return new BigDecimal(n).setScale(digits, RoundingMode.HALF_UP).toPlainString();
+}
+//#endregion
+//#region roundTo
+private static Object roundTo(Object v, int digits) {
+  Double n = looseNumber(v);
+  if (n == null) return null;
+  double f = Math.pow(10, digits);
+  return Math.floor(n * f + 0.5) / f;
+}
+//#endregion
+//#region floorOf
+private static Object floorOf(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) Math.floor(n);
+}
+//#endregion
+//#region ceilOf
+private static Object ceilOf(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) Math.ceil(n);
+}
+//#endregion
+//#region absOf
+private static Object absOf(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) Math.abs(n);
+}
+//#endregion
+//#region multiply
+private static Object multiply(Object v, double operand) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) (n * operand);
+}
+//#endregion
+//#region divide
+private static Object divide(Object v, double operand) {
+  Double n = looseNumber(v);
+  return n == null || operand == 0 ? null : (Object) (n / operand);
+}
+//#endregion
+//#region add
+private static Object add(Object v, double operand) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) (n + operand);
+}
+//#endregion
+//#region subtract
+private static Object subtract(Object v, double operand) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) (n - operand);
+}
+//#endregion
+//#region precisionOf
+private static Object precisionOf(Object v, int digits) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) new BigDecimal(n).setScale(digits, RoundingMode.HALF_UP).doubleValue();
+}
+//#endregion
+//#region DateParts
+private static final class DateParts {
+  int year = 1970, month = 1, day = 1, hour, minute, second, millis;
+  boolean hasTime;
+  Integer offset;
+
+  boolean valid() {
+    if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+    return day >= 1 && day <= java.time.YearMonth.of(year, month).lengthOfMonth();
+  }
+}
+//#endregion
+//#region parseOffset
+private static int parseOffset(String text) {
+  if ("Z".equals(text)) return 0;
+  int sign = text.charAt(0) == '-' ? -1 : 1;
+  String digits = text.substring(1).replace(":", "");
+  return sign * (Integer.parseInt(digits.substring(0, 2)) * 60 + Integer.parseInt(digits.substring(2, 4)));
+}
+//#endregion
+//#region parseIsoDate
+private static final Pattern ISO_DATE = Pattern.compile("^(\\d{4})-(\\d{2})-(\\d{2})(?:[T ](\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d{1,9}))?)?(Z|[+-]\\d{2}:?\\d{2})?)?$");
+
+private static DateParts parseIsoDate(String text) {
+  Matcher m = ISO_DATE.matcher(text.trim());
+  if (!m.matches()) return null;
+  DateParts p = new DateParts();
+  p.year = Integer.parseInt(m.group(1));
+  p.month = Integer.parseInt(m.group(2));
+  p.day = Integer.parseInt(m.group(3));
+  p.hasTime = m.group(4) != null;
+  if (m.group(4) != null) p.hour = Integer.parseInt(m.group(4));
+  if (m.group(5) != null) p.minute = Integer.parseInt(m.group(5));
+  if (m.group(6) != null) p.second = Integer.parseInt(m.group(6));
+  if (m.group(7) != null) p.millis = Integer.parseInt((m.group(7) + "00").substring(0, 3));
+  if (m.group(8) != null) p.offset = parseOffset(m.group(8));
+  return p.valid() ? p : null;
+}
+//#endregion
+//#region patternTokens
+private static List<String> patternTokens(String pattern) {
+  List<String> out = new ArrayList<>();
+  int i = 0;
+  while (i < pattern.length()) {
+    if (pattern.charAt(i) == '\'') {
+      int end = pattern.indexOf('\'', i + 1);
+      out.add("L" + (end == i + 1 ? "'" : pattern.substring(i + 1, end)));
+      i = end + 1;
+      continue;
+    }
+    String found = null;
+    for (String t : List.of("yyyy", "SSS", "XXX", "MM", "dd", "HH", "mm", "ss")) {
+      if (pattern.startsWith(t, i)) {
+        found = t;
+        break;
+      }
+    }
+    if (found != null) {
+      out.add("T" + found);
+      i += found.length();
+    } else {
+      out.add("L" + pattern.charAt(i));
+      i++;
+    }
+  }
+  return out;
+}
+//#endregion
+//#region parseWithPattern
+private static DateParts parseWithPattern(String text, String pattern) {
+  DateParts p = new DateParts();
+  String value = text.trim();
+  int i = 0;
+  for (String t : patternTokens(pattern)) {
+    String body = t.substring(1);
+    if (t.charAt(0) == 'L') {
+      if (!value.startsWith(body, i)) return null;
+      i += body.length();
+    } else if ("XXX".equals(body)) {
+      Matcher m = Pattern.compile("^(Z|[+-]\\d{2}:\\d{2})").matcher(value.substring(i));
+      if (!m.find()) return null;
+      p.offset = parseOffset(m.group(1));
+      i += m.group(1).length();
+      p.hasTime = true;
+    } else {
+      int width = "yyyy".equals(body) ? 4 : "SSS".equals(body) ? 3 : 2;
+      if (i + width > value.length()) return null;
+      String slice = value.substring(i, i + width);
+      if (!slice.matches("\\d+")) return null;
+      i += width;
+      int n = Integer.parseInt(slice);
+      switch (body) {
+        case "yyyy": p.year = n; break;
+        case "MM": p.month = n; break;
+        case "dd": p.day = n; break;
+        case "HH": p.hour = n; p.hasTime = true; break;
+        case "mm": p.minute = n; p.hasTime = true; break;
+        case "ss": p.second = n; p.hasTime = true; break;
+        default: p.millis = n; p.hasTime = true; break;
+      }
+    }
+  }
+  return i == value.length() && p.valid() ? p : null;
+}
+//#endregion
+//#region readDate
+private static DateParts readDate(Object v, String pattern) {
+  return pattern.isEmpty() ? parseIsoDate(toText(v)) : parseWithPattern(toText(v), pattern);
+}
+//#endregion
+//#region formatOffset
+private static String formatOffset(int offset) {
+  if (offset == 0) return "Z";
+  int abs = Math.abs(offset);
+  return String.format("%s%02d:%02d", offset < 0 ? "-" : "+", abs / 60, abs % 60);
+}
+//#endregion
+//#region formatParts
+private static String formatParts(DateParts p, String pattern) {
+  StringBuilder out = new StringBuilder();
+  for (String t : patternTokens(pattern)) {
+    String body = t.substring(1);
+    if (t.charAt(0) == 'L') {
+      out.append(body);
+      continue;
+    }
+    switch (body) {
+      case "yyyy": out.append(String.format("%04d", p.year)); break;
+      case "MM": out.append(String.format("%02d", p.month)); break;
+      case "dd": out.append(String.format("%02d", p.day)); break;
+      case "HH": out.append(String.format("%02d", p.hour)); break;
+      case "mm": out.append(String.format("%02d", p.minute)); break;
+      case "ss": out.append(String.format("%02d", p.second)); break;
+      case "SSS": out.append(String.format("%03d", p.millis)); break;
+      default: if (p.offset != null) out.append(formatOffset(p.offset)); break;
+    }
+  }
+  return out.toString();
+}
+//#endregion
+//#region serializeDate
+private static String serializeDate(DateParts p) {
+  String date = String.format("%04d-%02d-%02d", p.year, p.month, p.day);
+  if (!p.hasTime) return date;
+  String ms = p.millis != 0 ? String.format(".%03d", p.millis) : "";
+  String off = p.offset == null ? "" : formatOffset(p.offset);
+  return date + String.format("T%02d:%02d:%02d", p.hour, p.minute, p.second) + ms + off;
+}
+//#endregion
+//#region toInstant
+private static Instant toInstant(DateParts p, String zone) {
+  LocalDateTime wall = LocalDateTime.of(p.year, p.month, p.day, p.hour, p.minute, p.second, p.millis * 1_000_000);
+  if (p.offset != null) return wall.toInstant(ZoneOffset.ofTotalSeconds(p.offset * 60));
+  return wall.atZone(ZoneId.of(zone)).toInstant();
+}
+//#endregion
+//#region stringToDate
+private static Object stringToDate(Object v, String pattern) {
+  DateParts d = readDate(v, pattern);
+  return d == null ? null : serializeDate(d);
+}
+//#endregion
+//#region dateToText
+private static Object dateToText(Object v, String pattern) {
+  DateParts d = readDate(v, "");
+  return d == null ? null : formatParts(d, pattern);
+}
+//#endregion
+//#region toIso8601
+private static Object toIso8601(Object v, String zone) {
+  DateParts d = readDate(v, "");
+  if (d == null) return null;
+  return DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC).format(toInstant(d, zone));
+}
+//#endregion
+//#region formatDate
+private static Object formatDate(Object v, String inputPattern, String pattern) {
+  DateParts d = readDate(v, inputPattern);
+  return d == null ? null : formatParts(d, pattern);
+}
+//#endregion
+//#region convertTimezone
+private static Object convertTimezone(Object v, String from, String to) {
+  DateParts d = readDate(v, "");
+  if (d == null) return null;
+  java.time.ZonedDateTime z = toInstant(d, from).atZone(ZoneId.of(to));
+  DateParts p = new DateParts();
+  p.year = z.getYear();
+  p.month = z.getMonthValue();
+  p.day = z.getDayOfMonth();
+  p.hour = z.getHour();
+  p.minute = z.getMinute();
+  p.second = z.getSecond();
+  p.millis = z.getNano() / 1_000_000;
+  p.hasTime = true;
+  p.offset = z.getOffset().getTotalSeconds() / 60;
+  return serializeDate(p);
+}
+//#endregion
+//#region datePart
+private static Object datePart(Object v, String part) {
+  DateParts d = readDate(v, "");
+  if (d == null) return null;
+  return (long) ("day".equals(part) ? d.day : "month".equals(part) ? d.month : d.year);
+}
+//#endregion
+//#region isValidDate
+private static Object isValidDate(Object v, String pattern) {
+  return readDate(v, pattern) != null;
+}
+//#endregion
+//#region stringToBoolean
+private static Object stringToBoolean(Object v, List<String> trueValues, List<String> falseValues) {
+  if (v instanceof Boolean) return v;
+  String text = toText(v).trim().toLowerCase(Locale.ROOT);
+  if (trueValues.contains(text)) return Boolean.TRUE;
+  if (falseValues.contains(text)) return Boolean.FALSE;
+  return null;
+}
+//#endregion
+//#region numberToBoolean
+private static Object numberToBoolean(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Object) (n != 0);
+}
+//#endregion
+//#region booleanToText
+private static Object booleanToText(Object v, String trueLabel, String falseLabel) {
+  if (!(v instanceof Boolean b)) return null;
+  return b ? trueLabel : falseLabel;
+}
+//#endregion
+//#region defaultValue
+private static Object defaultValue(Object v, Object fallback, boolean emptyAsNull) {
+  return v == null || (emptyAsNull && "".equals(v)) ? fallback : v;
+}
+//#endregion
+//#region coalesce
+private static Object coalesce(Object v, Object... others) {
+  if (v != null) return v;
+  for (Object alt : others) if (alt != null) return alt;
+  return null;
+}
+//#endregion
+//#region conditional
+private static Object conditional(Object v, String operator, Object compare, boolean hasThen, Object thenValue, boolean hasElse, Object elseValue) {
+  if (evaluate(v, operator, compare)) return hasThen ? thenValue : v;
+  return hasElse ? elseValue : v;
+}
+//#endregion
+//#region mapOf
+private static Map<String, Object> mapOf(Object... pairs) {
+  Map<String, Object> out = new LinkedHashMap<>();
+  for (int i = 0; i < pairs.length; i += 2) out.put((String) pairs[i], pairs[i + 1]);
+  return out;
+}
+//#endregion
+//#region lookup
+private static Object lookup(Object v, Map<String, Object> table, Object fallback, boolean keepUnmatched) {
+  String key = toText(v);
+  if (table.containsKey(key)) return table.get(key);
+  if (fallback != null) return fallback;
+  return keepUnmatched ? v : null;
+}
+//#endregion
+//#region enumMap
+private static Object enumMap(Object v, Map<String, Object> table, boolean strict) {
+  String key = toText(v);
+  if (table.containsKey(key)) return table.get(key);
+  return strict ? null : v;
+}
+//#endregion
+//#region nullHandling
+private static Object nullHandling(Object v, String mode) {
+  if (v != null) return v;
+  switch (mode) {
+    case "empty-string": return "";
+    case "zero": return 0L;
+    case "false": return Boolean.FALSE;
+    default: return null;
+  }
+}
+//#endregion
+//#region removeEmpty
+private static Object removeEmpty(Object v) {
+  if (v instanceof Collection<?> c) {
+    List<Object> out = new ArrayList<>();
+    for (Object x : c) {
+      Object cleaned = removeEmpty(x);
+      if (!isEmptyValue(cleaned)) out.add(cleaned);
+    }
+    return out;
+  }
+  if (v instanceof Map<?, ?> m) {
+    Map<Object, Object> out = new LinkedHashMap<>();
+    for (Map.Entry<?, ?> e : m.entrySet()) {
+      Object cleaned = removeEmpty(e.getValue());
+      if (!isEmptyValue(cleaned)) out.put(e.getKey(), cleaned);
+    }
+    return out;
+  }
+  return v;
+}
+//#endregion
+//#region filterList
+private static Object filterList(Object v, Function<Object, Object> field, String operator, Object compare) {
+  if (!(v instanceof Collection<?> c)) return null;
+  List<Object> out = new ArrayList<>();
+  for (Object el : c) if (evaluate(field.apply(el), operator, compare)) out.add(el);
+  return out;
+}
+//#endregion
+//#region mapList
+private static Object mapList(Object v, Function<Object, Object> field) {
+  if (!(v instanceof Collection<?> c)) return null;
+  List<Object> out = new ArrayList<>();
+  for (Object el : c) out.add(field.apply(el));
+  return out;
+}
+//#endregion
+//#region distinctList
+private static Object distinctList(Object v, Function<Object, Object> field) {
+  if (!(v instanceof Collection<?> c)) return null;
+  List<Object> out = new ArrayList<>();
+  Set<String> seen = new HashSet<>();
+  for (Object el : c) {
+    Object key = field.apply(el);
+    String text = (key instanceof String ? "s:" : key instanceof Number ? "n:" : "o:") + toText(key);
+    if (seen.add(text)) out.add(el);
+  }
+  return out;
+}
+//#endregion
+//#region sortList
+@SuppressWarnings("unchecked")
+private static Object sortList(Object v, Function<Object, Object> field, boolean desc) {
+  if (!(v instanceof Collection<?> c)) return null;
+  return sortBy(new ArrayList<>((Collection<Object>) c), field, desc);
+}
+//#endregion
+//#region countList
+private static Object countList(Object v) {
+  if (v == null) return 0L;
+  return v instanceof Collection<?> c ? (Object) (long) c.size() : null;
+}
+//#endregion
+//#region numericItems
+private static List<Double> numericItems(Object v, Function<Object, Object> field) {
+  if (!(v instanceof Collection<?> c)) return null;
+  List<Double> out = new ArrayList<>();
+  for (Object el : c) {
+    Object x = field.apply(el);
+    if (x == null) continue;
+    Double n = looseNumber(x);
+    if (n == null) return null;
+    out.add(n);
+  }
+  return out;
+}
+//#endregion
+//#region sumList
+private static Object sumList(Object v, Function<Object, Object> field) {
+  List<Double> nums = numericItems(v, field);
+  if (nums == null) return null;
+  double sum = 0;
+  for (double n : nums) sum += n;
+  return sum;
+}
+//#endregion
+//#region averageList
+private static Object averageList(Object v, Function<Object, Object> field) {
+  List<Double> nums = numericItems(v, field);
+  if (nums == null || nums.isEmpty()) return null;
+  double sum = 0;
+  for (double n : nums) sum += n;
+  return sum / nums.size();
+}
+//#endregion
+//#region extreme
+private static Object extreme(Object v, Function<Object, Object> field, int sign) {
+  if (!(v instanceof Collection<?> c)) return null;
+  Object best = null;
+  for (Object el : c) {
+    Object x = field.apply(el);
+    if (x == null) continue;
+    if (best == null || compareValues(x, best) * sign > 0) best = x;
+  }
+  return best;
+}
+//#endregion
+//#region firstOf
+private static Object firstOf(Object v) {
+  if (!(v instanceof Collection<?> c) || c.isEmpty()) return null;
+  return c.iterator().next();
+}
+//#endregion
+//#region lastOf
+private static Object lastOf(Object v) {
+  if (!(v instanceof Collection<?> c) || c.isEmpty()) return null;
+  Object last = null;
+  for (Object x : c) last = x;
+  return last;
+}
+//#endregion
+//#region asString
+private static String asString(Object v) {
+  return v == null ? null : toText(v);
+}
+//#endregion
+//#region asLong
+private static Long asLong(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Long) n.longValue();
+}
+//#endregion
+//#region asInteger
+private static Integer asInteger(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Integer) n.intValue();
+}
+//#endregion
+//#region asShort
+private static Short asShort(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Short) n.shortValue();
+}
+//#endregion
+//#region asByte
+private static Byte asByte(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Byte) n.byteValue();
+}
+//#endregion
+//#region asDouble
+private static Double asDouble(Object v) {
+  return looseNumber(v);
+}
+//#endregion
+//#region asFloat
+private static Float asFloat(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : (Float) n.floatValue();
+}
+//#endregion
+//#region asBigDecimal
+private static BigDecimal asBigDecimal(Object v) {
+  if (v instanceof BigDecimal b) return b;
+  Double n = looseNumber(v);
+  return n == null ? null : BigDecimal.valueOf(n);
+}
+//#endregion
+//#region asBigInteger
+private static BigInteger asBigInteger(Object v) {
+  Double n = looseNumber(v);
+  return n == null ? null : BigDecimal.valueOf(n).toBigInteger();
+}
+//#endregion
+//#region asBoolean
+private static Boolean asBoolean(Object v) {
+  if (v instanceof Boolean b) return b;
+  if (v == null) return null;
+  String text = toText(v).trim().toLowerCase(Locale.ROOT);
+  return "true".equals(text) ? Boolean.TRUE : "false".equals(text) ? Boolean.FALSE : null;
+}
+//#endregion
+//#region asLocalDate
+private static LocalDate asLocalDate(Object v) {
+  if (v instanceof LocalDate d) return d;
+  DateParts p = v == null ? null : parseIsoDate(toText(v));
+  return p == null ? null : LocalDate.of(p.year, p.month, p.day);
+}
+//#endregion
+//#region asLocalDateTime
+private static LocalDateTime asLocalDateTime(Object v) {
+  if (v instanceof LocalDateTime d) return d;
+  DateParts p = v == null ? null : parseIsoDate(toText(v));
+  return p == null ? null : LocalDateTime.of(p.year, p.month, p.day, p.hour, p.minute, p.second, p.millis * 1_000_000);
+}
+//#endregion
+//#region asOffsetDateTime
+private static OffsetDateTime asOffsetDateTime(Object v) {
+  if (v instanceof OffsetDateTime d) return d;
+  DateParts p = v == null ? null : parseIsoDate(toText(v));
+  return p == null ? null : OffsetDateTime.of(p.year, p.month, p.day, p.hour, p.minute, p.second, p.millis * 1_000_000, ZoneOffset.ofTotalSeconds((p.offset == null ? 0 : p.offset) * 60));
+}
+//#endregion
+//#region asZonedDateTime
+private static ZonedDateTime asZonedDateTime(Object v) {
+  if (v instanceof ZonedDateTime d) return d;
+  OffsetDateTime o = asOffsetDateTime(v);
+  return o == null ? null : o.toZonedDateTime();
+}
+//#endregion
+//#region asInstant
+private static Instant asInstant(Object v) {
+  if (v instanceof Instant d) return d;
+  OffsetDateTime o = asOffsetDateTime(v);
+  return o == null ? null : o.toInstant();
+}
+//#endregion
+//#region asUuid
+private static UUID asUuid(Object v) {
+  if (v instanceof UUID u) return u;
+  try {
+    return v == null ? null : UUID.fromString(toText(v));
+  } catch (IllegalArgumentException e) {
+    return null;
+  }
+}
+//#endregion
+//#region asEnum
+private static <E extends Enum<E>> E asEnum(Class<E> type, Object v) {
+  if (v == null) return null;
+  try {
+    return Enum.valueOf(type, toText(v));
+  } catch (IllegalArgumentException e) {
+    return null;
+  }
+}
+//#endregion
+//#region asListOf
+private static <T> List<T> asListOf(Object v, Function<Object, T> convert) {
+  if (!(v instanceof Collection<?> c)) return null;
+  List<T> out = new ArrayList<>();
+  for (Object x : c) out.add(convert.apply(x));
+  return out;
+}
+//#endregion
+//#region asSetOf
+private static <T> Set<T> asSetOf(Object v, Function<Object, T> convert) {
+  List<T> list = asListOf(v, convert);
+  return list == null ? null : new LinkedHashSet<>(list);
+}
+//#endregion

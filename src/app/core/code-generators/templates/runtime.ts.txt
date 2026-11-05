@@ -1,0 +1,684 @@
+//#region isNil
+function isNil(v: unknown): v is null | undefined {
+  return v === null || v === undefined;
+}
+//#endregion
+//#region toText
+function toText(v: unknown): string {
+  if (isNil(v)) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+//#endregion
+//#region looseNumber
+function looseNumber(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(v.trim())) return Number(v.trim());
+  return null;
+}
+//#endregion
+//#region compareValues
+function compareValues(a: unknown, b: unknown): number {
+  const na = looseNumber(a);
+  const nb = looseNumber(b);
+  if (na !== null && nb !== null) return na < nb ? -1 : na > nb ? 1 : 0;
+  const sa = toText(a);
+  const sb = toText(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+//#endregion
+//#region valuesEqual
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (isNil(a) || isNil(b)) return isNil(a) && isNil(b);
+  return toText(a) === toText(b);
+}
+//#endregion
+//#region isEmptyValue
+function isEmptyValue(v: unknown): boolean {
+  if (isNil(v) || v === '') return true;
+  if (Array.isArray(v)) return v.length === 0;
+  return typeof v === 'object' && Object.keys(v as object).length === 0;
+}
+//#endregion
+//#region asList
+function asList(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (isNil(v)) return [];
+  return toText(v).split(',').map((s) => s.trim());
+}
+//#endregion
+//#region evaluate
+function evaluate(value: unknown, operator: string, compare?: unknown): boolean {
+  switch (operator) {
+    case 'eq': return valuesEqual(value, compare);
+    case 'ne': return !valuesEqual(value, compare);
+    case 'gt': return !isNil(value) && compareValues(value, compare) > 0;
+    case 'gte': return !isNil(value) && compareValues(value, compare) >= 0;
+    case 'lt': return !isNil(value) && compareValues(value, compare) < 0;
+    case 'lte': return !isNil(value) && compareValues(value, compare) <= 0;
+    case 'contains':
+      if (Array.isArray(value)) return value.some((x) => valuesEqual(x, compare));
+      return !isNil(value) && toText(value).includes(toText(compare));
+    case 'startsWith': return !isNil(value) && toText(value).startsWith(toText(compare));
+    case 'endsWith': return !isNil(value) && toText(value).endsWith(toText(compare));
+    case 'in': return asList(compare).some((x) => valuesEqual(value, x));
+    case 'notIn': return !asList(compare).some((x) => valuesEqual(value, x));
+    case 'exists': return !isNil(value);
+    case 'notExists': return isNil(value);
+    case 'empty': return isEmptyValue(value);
+    case 'notEmpty': return !isEmptyValue(value);
+    case 'matches':
+      try { return !isNil(value) && new RegExp(toText(compare)).test(toText(value)); } catch { return false; }
+    default: return false;
+  }
+}
+//#endregion
+//#region lift
+/** Aplica a função a cada item de uma lista. Nulo e ausente atravessam sem chamar a função. */
+function lift(v: unknown, fn: (x: unknown) => unknown): unknown {
+  if (Array.isArray(v)) return v.map((x) => (isNil(x) ? x : (fn(x) ?? null)));
+  return isNil(v) ? v : fn(v);
+}
+//#endregion
+//#region liftNullable
+/** Como lift, mas também chama a função com nulo e ausente. */
+function liftNullable(v: unknown, fn: (x: unknown) => unknown): unknown {
+  if (Array.isArray(v)) return v.map((x) => fn(x) ?? null);
+  return fn(v);
+}
+//#endregion
+//#region asArray
+function asArray<T>(v: readonly T[] | null | undefined): readonly T[] | undefined {
+  return Array.isArray(v) ? v : undefined;
+}
+//#endregion
+//#region setAt
+function setAt(list: unknown[], index: number, value: unknown): void {
+  if (value === undefined) return;
+  while (list.length < index) list.push(null);
+  list[index] = value;
+}
+//#endregion
+//#region SKIP
+const SKIP = Symbol('skip');
+//#endregion
+//#region collect
+/** Coleta valores de uma lista; SKIP descarta o item, ausente vira null para preservar a posição. */
+function collect<T>(list: readonly T[] | null | undefined, fn: (item: T) => unknown): unknown[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const out: unknown[] = [];
+  for (const item of list as readonly T[]) {
+    const v = fn(item);
+    if (v !== SKIP) out.push(v === undefined ? null : v);
+  }
+  return out;
+}
+//#endregion
+//#region collectFlat
+function collectFlat<T>(list: readonly T[] | null | undefined, fn: (item: T) => unknown): unknown[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const out: unknown[] = [];
+  for (const item of list as readonly T[]) {
+    const v = fn(item);
+    if (Array.isArray(v)) out.push(...v);
+  }
+  return out;
+}
+//#endregion
+//#region selectRows
+/** Seleciona as linhas de um array: filtro, depois distinct, depois ordenação estável. */
+function selectRows<T>(
+  rows: readonly T[],
+  options: { filter?: (item: T) => boolean; distinct?: (item: T) => unknown; sort?: (item: T) => unknown; desc?: boolean },
+): T[] {
+  let out = [...rows];
+  if (options.filter) out = out.filter(options.filter);
+  const distinct = options.distinct;
+  if (distinct) {
+    const seen = new Set<string>();
+    out = out.filter((item) => {
+      const key = JSON.stringify(distinct(item) ?? null);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+  const sort = options.sort;
+  if (sort) out = sortBy(out, sort, options.desc === true);
+  return out;
+}
+//#endregion
+//#region sortBy
+function sortBy<T>(list: readonly T[], key: (item: T) => unknown, desc: boolean): T[] {
+  const dir = desc ? -1 : 1;
+  return list
+    .map((el, i) => ({ el, i, k: key(el) }))
+    .sort((a, b) => {
+      const an = isNil(a.k);
+      const bn = isNil(b.k);
+      if (an || bn) return an && bn ? a.i - b.i : an ? 1 : -1;
+      return compareValues(a.k, b.k) * dir || a.i - b.i;
+    })
+    .map((x) => x.el);
+}
+//#endregion
+//#region uppercase
+function uppercase(v: unknown): unknown {
+  return toText(v).toUpperCase();
+}
+//#endregion
+//#region lowercase
+function lowercase(v: unknown): unknown {
+  return toText(v).toLowerCase();
+}
+//#endregion
+//#region trim
+function trim(v: unknown): unknown {
+  return toText(v).trim();
+}
+//#endregion
+//#region capitalize
+function capitalize(v: unknown, allWords: boolean): unknown {
+  const lower = toText(v).toLowerCase();
+  if (!allWords) return lower.charAt(0).toUpperCase() + lower.slice(1);
+  let out = '';
+  let start = true;
+  for (const ch of lower) {
+    out += start ? ch.toUpperCase() : ch;
+    start = /\s/.test(ch);
+  }
+  return out;
+}
+//#endregion
+//#region replaceText
+function replaceText(v: unknown, search: string, replacement: string, regex: boolean, all: boolean): unknown {
+  const text = toText(v);
+  if (regex) return text.replace(new RegExp(search, all ? 'g' : ''), replacement);
+  if (search === '') return text;
+  if (all) return text.split(search).join(replacement);
+  const at = text.indexOf(search);
+  return at < 0 ? text : text.slice(0, at) + replacement + text.slice(at + search.length);
+}
+//#endregion
+//#region substringOf
+function substringOf(v: unknown, start: number, end: number | null): unknown {
+  return end === null ? toText(v).substring(start) : toText(v).substring(start, end);
+}
+//#endregion
+//#region splitText
+function splitText(v: unknown, separator: string): unknown {
+  return toText(v).split(separator);
+}
+//#endregion
+//#region joinList
+function joinList(v: unknown, separator: string): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  return v.map((x) => toText(x)).join(separator);
+}
+//#endregion
+//#region concatText
+function concatText(v: unknown, prefix: string, suffix: string, separator: string, others: unknown[]): unknown {
+  const parts = [v, ...others].filter((x) => !isNil(x)).map((x) => toText(x));
+  if (parts.length === 0 && !prefix && !suffix) return v;
+  return prefix + parts.join(separator) + suffix;
+}
+//#endregion
+//#region removeAccents
+function removeAccents(v: unknown): unknown {
+  return toText(v).normalize('NFD').replace(/\p{M}+/gu, '');
+}
+//#endregion
+//#region padStartText
+function padStartText(v: unknown, length: number, fill: string): unknown {
+  return toText(v).padStart(length, fill);
+}
+//#endregion
+//#region padEndText
+function padEndText(v: unknown, length: number, fill: string): unknown {
+  return toText(v).padEnd(length, fill);
+}
+//#endregion
+//#region stringToNumber
+/** Valor inválido resulta em null, como no motor do MapForge. */
+function stringToNumber(v: unknown, decimalSeparator: string): unknown {
+  if (typeof v === 'number') return v;
+  const text = toText(v).trim();
+  return looseNumber(decimalSeparator === ',' ? text.replace(/\./g, '').replace(',', '.') : text);
+}
+//#endregion
+//#region numberToText
+function numberToText(v: unknown, digits: number | null): unknown {
+  const n = looseNumber(v);
+  if (n === null) return null;
+  return digits === null ? String(n) : n.toFixed(digits);
+}
+//#endregion
+//#region roundTo
+function roundTo(v: unknown, digits: number): unknown {
+  const n = looseNumber(v);
+  if (n === null) return null;
+  const f = Math.pow(10, digits);
+  return Math.round(n * f) / f;
+}
+//#endregion
+//#region floorOf
+function floorOf(v: unknown): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : Math.floor(n);
+}
+//#endregion
+//#region ceilOf
+function ceilOf(v: unknown): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : Math.ceil(n);
+}
+//#endregion
+//#region absOf
+function absOf(v: unknown): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : Math.abs(n);
+}
+//#endregion
+//#region multiply
+function multiply(v: unknown, operand: number): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : n * operand;
+}
+//#endregion
+//#region divide
+function divide(v: unknown, operand: number): unknown {
+  const n = looseNumber(v);
+  return n === null || operand === 0 ? null : n / operand;
+}
+//#endregion
+//#region add
+function add(v: unknown, operand: number): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : n + operand;
+}
+//#endregion
+//#region subtract
+function subtract(v: unknown, operand: number): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : n - operand;
+}
+//#endregion
+//#region precisionOf
+function precisionOf(v: unknown, digits: number): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : Number(n.toFixed(digits));
+}
+//#endregion
+//#region DateParts
+interface DateParts {
+  year: number; month: number; day: number; hour: number; minute: number; second: number; millis: number;
+  hasTime: boolean; offset: number | null;
+}
+//#endregion
+//#region pad2
+function pad2(n: number, width = 2): string {
+  return String(Math.abs(n)).padStart(width, '0');
+}
+//#endregion
+//#region validParts
+function validParts(p: DateParts): boolean {
+  const leap = (p.year % 4 === 0 && p.year % 100 !== 0) || p.year % 400 === 0;
+  const days = p.month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(p.month) ? 30 : 31;
+  return p.month >= 1 && p.month <= 12 && p.day >= 1 && p.day <= days && p.hour <= 23 && p.minute <= 59 && p.second <= 59;
+}
+//#endregion
+//#region parseOffset
+function parseOffset(text: string): number {
+  if (text === 'Z') return 0;
+  const sign = text[0] === '-' ? -1 : 1;
+  const digits = text.slice(1).replace(':', '');
+  return sign * (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4)));
+}
+//#endregion
+//#region parseIsoDate
+function parseIsoDate(text: string): DateParts | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/.exec(text.trim());
+  if (!m) return null;
+  const parts: DateParts = {
+    year: Number(m[1]), month: Number(m[2]), day: Number(m[3]),
+    hour: m[4] ? Number(m[4]) : 0, minute: m[5] ? Number(m[5]) : 0, second: m[6] ? Number(m[6]) : 0,
+    millis: m[7] ? Number(m[7].padEnd(3, '0').slice(0, 3)) : 0,
+    hasTime: m[4] !== undefined, offset: m[8] ? parseOffset(m[8]) : null,
+  };
+  return validParts(parts) ? parts : null;
+}
+//#endregion
+//#region patternTokens
+function patternTokens(pattern: string): { token?: string; literal?: string }[] {
+  const out: { token?: string; literal?: string }[] = [];
+  let i = 0;
+  while (i < pattern.length) {
+    if (pattern[i] === "'") {
+      const end = pattern.indexOf("'", i + 1);
+      out.push({ literal: end === i + 1 ? "'" : pattern.slice(i + 1, end) });
+      i = end + 1;
+      continue;
+    }
+    const tok = ['yyyy', 'SSS', 'XXX', 'MM', 'dd', 'HH', 'mm', 'ss'].find((t) => pattern.startsWith(t, i));
+    if (tok) {
+      out.push({ token: tok });
+      i += tok.length;
+    } else {
+      out.push({ literal: pattern[i] });
+      i++;
+    }
+  }
+  return out;
+}
+//#endregion
+//#region parseWithPattern
+function parseWithPattern(text: string, pattern: string): DateParts | null {
+  const p: DateParts = { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, millis: 0, hasTime: false, offset: null };
+  const value = text.trim();
+  let i = 0;
+  for (const t of patternTokens(pattern)) {
+    if (t.literal !== undefined) {
+      if (!value.startsWith(t.literal, i)) return null;
+      i += t.literal.length;
+    } else if (t.token === 'XXX') {
+      const m = /^(Z|[+-]\d{2}:\d{2})/.exec(value.slice(i));
+      if (!m) return null;
+      p.offset = parseOffset(m[1]);
+      i += m[1].length;
+      p.hasTime = true;
+    } else {
+      const width = t.token === 'yyyy' ? 4 : t.token === 'SSS' ? 3 : 2;
+      const slice = value.slice(i, i + width);
+      if (slice.length !== width || !/^\d+$/.test(slice)) return null;
+      i += width;
+      const n = Number(slice);
+      if (t.token === 'yyyy') p.year = n;
+      else if (t.token === 'MM') p.month = n;
+      else if (t.token === 'dd') p.day = n;
+      else {
+        p.hasTime = true;
+        if (t.token === 'HH') p.hour = n;
+        else if (t.token === 'mm') p.minute = n;
+        else if (t.token === 'ss') p.second = n;
+        else p.millis = n;
+      }
+    }
+  }
+  return i === value.length && validParts(p) ? p : null;
+}
+//#endregion
+//#region readDate
+function readDate(v: unknown, pattern: string): DateParts | null {
+  return pattern ? parseWithPattern(toText(v), pattern) : parseIsoDate(toText(v));
+}
+//#endregion
+//#region formatOffset
+function formatOffset(offset: number): string {
+  if (offset === 0) return 'Z';
+  const abs = Math.abs(offset);
+  return `${offset < 0 ? '-' : '+'}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+//#endregion
+//#region formatParts
+function formatParts(p: DateParts, pattern: string): string {
+  const values: Record<string, string> = {
+    yyyy: pad2(p.year, 4), MM: pad2(p.month), dd: pad2(p.day), HH: pad2(p.hour), mm: pad2(p.minute),
+    ss: pad2(p.second), SSS: pad2(p.millis, 3), XXX: p.offset === null ? '' : formatOffset(p.offset),
+  };
+  return patternTokens(pattern).map((t) => t.literal ?? values[t.token as string]).join('');
+}
+//#endregion
+//#region serializeDate
+function serializeDate(p: DateParts): string {
+  const date = `${pad2(p.year, 4)}-${pad2(p.month)}-${pad2(p.day)}`;
+  if (!p.hasTime) return date;
+  const ms = p.millis ? `.${pad2(p.millis, 3)}` : '';
+  const off = p.offset === null ? '' : formatOffset(p.offset);
+  return `${date}T${pad2(p.hour)}:${pad2(p.minute)}:${pad2(p.second)}${ms}${off}`;
+}
+//#endregion
+//#region zoneOffsetAt
+function zoneOffsetAt(epochMs: number, zone: string): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+  });
+  const f: Record<string, number> = {};
+  for (const part of fmt.formatToParts(new Date(epochMs))) {
+    if (part.type !== 'literal') f[part.type] = Number(part.value);
+  }
+  const local = Date.UTC(f['year'], f['month'] - 1, f['day'], f['hour'], f['minute'], f['second']);
+  return Math.round((local - Math.floor(epochMs / 1000) * 1000) / 60000);
+}
+//#endregion
+//#region toEpochMillis
+function toEpochMillis(p: DateParts, zone: string): number {
+  const wall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second, p.millis);
+  if (p.offset !== null) return wall - p.offset * 60000;
+  const guess = wall - zoneOffsetAt(wall, zone) * 60000;
+  return wall - zoneOffsetAt(guess, zone) * 60000;
+}
+//#endregion
+//#region stringToDate
+function stringToDate(v: unknown, pattern: string): unknown {
+  const d = readDate(v, pattern);
+  return d ? serializeDate(d) : null;
+}
+//#endregion
+//#region dateToText
+function dateToText(v: unknown, pattern: string): unknown {
+  const d = readDate(v, '');
+  return d ? formatParts(d, pattern) : null;
+}
+//#endregion
+//#region toIso8601
+function toIso8601(v: unknown, zone: string): unknown {
+  const d = readDate(v, '');
+  return d ? new Date(toEpochMillis(d, zone)).toISOString() : null;
+}
+//#endregion
+//#region formatDate
+function formatDate(v: unknown, inputPattern: string, pattern: string): unknown {
+  const d = readDate(v, inputPattern);
+  return d ? formatParts(d, pattern) : null;
+}
+//#endregion
+//#region convertTimezone
+function convertTimezone(v: unknown, from: string, to: string): unknown {
+  const d = readDate(v, '');
+  if (!d) return null;
+  const instant = toEpochMillis(d, from);
+  const offset = zoneOffsetAt(instant, to);
+  const w = new Date(instant + offset * 60000);
+  return serializeDate({
+    year: w.getUTCFullYear(), month: w.getUTCMonth() + 1, day: w.getUTCDate(), hour: w.getUTCHours(),
+    minute: w.getUTCMinutes(), second: w.getUTCSeconds(), millis: w.getUTCMilliseconds(), hasTime: true, offset,
+  });
+}
+//#endregion
+//#region datePart
+function datePart(v: unknown, part: string): unknown {
+  const d = readDate(v, '');
+  if (!d) return null;
+  return part === 'day' ? d.day : part === 'month' ? d.month : d.year;
+}
+//#endregion
+//#region isValidDate
+function isValidDate(v: unknown, pattern: string): unknown {
+  return readDate(v, pattern) !== null;
+}
+//#endregion
+//#region stringToBoolean
+function stringToBoolean(v: unknown, trueValues: string[], falseValues: string[]): unknown {
+  if (typeof v === 'boolean') return v;
+  const text = toText(v).trim().toLowerCase();
+  if (trueValues.includes(text)) return true;
+  if (falseValues.includes(text)) return false;
+  return null;
+}
+//#endregion
+//#region numberToBoolean
+function numberToBoolean(v: unknown): unknown {
+  const n = looseNumber(v);
+  return n === null ? null : n !== 0;
+}
+//#endregion
+//#region booleanToText
+function booleanToText(v: unknown, trueLabel: string, falseLabel: string): unknown {
+  if (typeof v !== 'boolean') return null;
+  return v ? trueLabel : falseLabel;
+}
+//#endregion
+//#region defaultValue
+function defaultValue(v: unknown, fallback: unknown, emptyAsNull: boolean): unknown {
+  return isNil(v) || (emptyAsNull && v === '') ? fallback : v;
+}
+//#endregion
+//#region coalesce
+function coalesce(v: unknown, others: unknown[]): unknown {
+  if (!isNil(v)) return v;
+  for (const alt of others) if (!isNil(alt)) return alt;
+  return v;
+}
+//#endregion
+//#region conditional
+function conditional(v: unknown, operator: string, compare: unknown, thenValue: unknown, elseValue: unknown): unknown {
+  const pick = evaluate(v, operator, compare) ? thenValue : elseValue;
+  return pick === undefined ? v : pick;
+}
+//#endregion
+//#region lookup
+function lookup(v: unknown, table: Record<string, unknown>, fallback: unknown, keepUnmatched: boolean): unknown {
+  const key = toText(v);
+  if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
+  if (fallback !== undefined) return fallback;
+  return keepUnmatched ? v : null;
+}
+//#endregion
+//#region enumMap
+function enumMap(v: unknown, table: Record<string, unknown>, strict: boolean): unknown {
+  const key = toText(v);
+  if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
+  return strict ? null : v;
+}
+//#endregion
+//#region nullHandling
+function nullHandling(v: unknown, mode: string): unknown {
+  if (!isNil(v)) return v;
+  switch (mode) {
+    case 'keep': case 'error': return null;
+    case 'empty-string': return '';
+    case 'zero': return 0;
+    case 'false': return false;
+    default: return undefined;
+  }
+}
+//#endregion
+//#region removeEmpty
+function removeEmpty(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map((x) => removeEmpty(x)).filter((x) => !isEmptyValue(x));
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(v)) {
+      const cleaned = removeEmpty(value);
+      if (!isEmptyValue(cleaned)) out[key] = cleaned;
+    }
+    return out;
+  }
+  return v;
+}
+//#endregion
+//#region filterList
+function filterList(v: unknown, field: (x: any) => unknown, operator: string, compare: unknown): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  return v.filter((el) => evaluate(field(el), operator, compare));
+}
+//#endregion
+//#region mapList
+function mapList(v: unknown, field: (x: any) => unknown): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  return v.map((el) => field(el) ?? null);
+}
+//#endregion
+//#region distinctList
+function distinctList(v: unknown, field: (x: any) => unknown): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  const seen = new Set<string>();
+  return v.filter((el) => {
+    const key = JSON.stringify(field(el) ?? null);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+//#endregion
+//#region sortList
+function sortList(v: unknown, field: (x: any) => unknown, desc: boolean): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  return sortBy(v, field, desc);
+}
+//#endregion
+//#region countList
+function countList(v: unknown): unknown {
+  if (isNil(v)) return 0;
+  return Array.isArray(v) ? v.length : null;
+}
+//#endregion
+//#region numericItems
+function numericItems(v: unknown, field: (x: any) => unknown): number[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: number[] = [];
+  for (const el of v) {
+    const x = field(el);
+    if (isNil(x)) continue;
+    const n = looseNumber(x);
+    if (n === null) return null;
+    out.push(n);
+  }
+  return out;
+}
+//#endregion
+//#region sumList
+function sumList(v: unknown, field: (x: any) => unknown): unknown {
+  if (isNil(v)) return v;
+  const nums = numericItems(v, field);
+  return nums === null ? null : nums.reduce((a, b) => a + b, 0);
+}
+//#endregion
+//#region averageList
+function averageList(v: unknown, field: (x: any) => unknown): unknown {
+  if (isNil(v)) return v;
+  const nums = numericItems(v, field);
+  return nums === null || nums.length === 0 ? null : nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+//#endregion
+//#region extreme
+function extreme(v: unknown, field: (x: any) => unknown, sign: number): unknown {
+  if (isNil(v)) return v;
+  if (!Array.isArray(v)) return null;
+  let best: unknown = undefined;
+  for (const el of v) {
+    const x = field(el);
+    if (isNil(x)) continue;
+    if (best === undefined || compareValues(x, best) * sign > 0) best = x;
+  }
+  return best === undefined ? null : best;
+}
+//#endregion
+//#region firstOf
+function firstOf(v: unknown): unknown {
+  if (isNil(v)) return v;
+  return Array.isArray(v) ? (v[0] ?? null) : null;
+}
+//#endregion
+//#region lastOf
+function lastOf(v: unknown): unknown {
+  if (isNil(v)) return v;
+  return Array.isArray(v) && v.length ? v[v.length - 1] : null;
+}
+//#endregion
